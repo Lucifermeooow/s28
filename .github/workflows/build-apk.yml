@@ -1,0 +1,163 @@
+name: Stream 22 - Android Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Stream 22 APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Detect Gradle project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Repository:"
+          pwd
+
+          echo "Gradle files:"
+          find . -maxdepth 3 -type f \
+            \( -name "settings.gradle" \
+            -o -name "settings.gradle.kts" \
+            -o -name "build.gradle" \
+            -o -name "build.gradle.kts" \
+            -o -name "gradlew" \
+            \) \
+            | sort
+
+      - name: Prepare Gradle wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "./gradlew" ]; then
+            echo "Using existing root Gradle wrapper."
+            chmod +x ./gradlew
+            exit 0
+          fi
+
+          echo "No root gradlew found."
+
+          if [ -f "./android/gradlew" ]; then
+            echo "Found android/gradlew."
+            chmod +x ./android/gradlew
+            cp ./android/gradlew ./gradlew
+            cp -R ./android/gradle ./gradle
+            chmod +x ./gradlew
+            exit 0
+          fi
+
+          echo "No Gradle wrapper found. Generating one."
+
+          gradle wrapper \
+            --gradle-version 8.11.1 \
+            --distribution-type bin
+
+          chmod +x ./gradlew
+
+      - name: Show Gradle version
+        run: ./gradlew --version
+
+      - name: Create temporary CI keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEYSTORE="$RUNNER_TEMP/stream22-ci.keystore"
+
+          keytool -genkeypair \
+            -v \
+            -keystore "$KEYSTORE" \
+            -storetype JKS \
+            -storepass "android" \
+            -keypass "android" \
+            -alias "stream22" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Stream 22, OU=CI, O=Stream 22, L=Unknown, ST=Unknown, C=US"
+
+          test -f "$KEYSTORE"
+
+          echo "STREAM22_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "STREAM22_KEYSTORE_PASSWORD=android" >> "$GITHUB_ENV"
+          echo "STREAM22_KEY_ALIAS=stream22" >> "$GITHUB_ENV"
+          echo "STREAM22_KEY_PASSWORD=android" >> "$GITHUB_ENV"
+
+      - name: Clean
+        run: ./gradlew clean
+
+      - name: Build Release APK
+        run: |
+          ./gradlew :app:assembleRelease \
+            --stacktrace \
+            --no-daemon
+
+      - name: Locate APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "APK files found:"
+          find . -type f -name "*.apk" -print | sort
+
+          APK="app/build/outputs/apk/release/app-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::Expected APK was not generated: $APK"
+            exit 1
+          fi
+
+          echo "Found:"
+          ls -lh "$APK"
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/release/app-release.apk"
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
+            -type f \
+            -name "apksigner" \
+            | sort -V \
+            | tail -n 1)
+
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found."
+            exit 1
+          fi
+
+          "$APKSIGNER" verify --verbose "$APK"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream22-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
